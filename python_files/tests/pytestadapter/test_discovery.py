@@ -4,6 +4,7 @@ import json
 import os
 import pathlib
 import sys
+import threading
 from typing import Any, Dict, List, Optional, cast
 
 import pytest
@@ -612,3 +613,25 @@ def test_symlink_with_project_root_path():
                 # Print the actual_item in JSON format if an assertion fails
                 print(json.dumps(actual_item, indent=4))
                 pytest.fail(str(e))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX FIFO behavior")
+def test_pipe_open_gives_up_when_no_reader(tmp_path, monkeypatch):
+    """If the editor went away during discovery, opening the result pipe must not hang forever."""
+    monkeypatch.setattr(vscode_pytest, "PIPE_CONNECT_TIMEOUT_SECONDS", 0.5)
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    outcome: List[BaseException] = []
+
+    def open_pipe():
+        try:
+            vscode_pytest._open_pipe_writer(os.fspath(fifo))  # noqa: SLF001
+        except BaseException as error:
+            outcome.append(error)
+
+    thread = threading.Thread(target=open_pipe, daemon=True)
+    thread.start()
+    thread.join(5)  # Bound from outside: a blocking open would never return.
+    assert not thread.is_alive(), "opening the pipe without a reader blocked"
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], OSError)

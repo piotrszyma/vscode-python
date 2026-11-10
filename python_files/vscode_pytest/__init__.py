@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import errno
 import json
 import os
 import pathlib
 import sys
+import time
 import traceback
 from typing import (
     TYPE_CHECKING,
@@ -1139,6 +1141,32 @@ def get_node_path(
     return result
 
 
+PIPE_CONNECT_TIMEOUT_SECONDS = 60.0
+
+
+def _open_pipe_writer(pipe_path: str):
+    """Opens the extension's pipe for writing, waiting at most PIPE_CONNECT_TIMEOUT_SECONDS.
+
+    On POSIX, a blocking open of a FIFO waits until a reader opens it. If the
+    editor was reloaded or closed during discovery, no reader ever comes and
+    the process would hang forever. A non-blocking open fails with ENXIO
+    instead, so retry until the deadline, then use the pipe as before.
+    """
+    if os.name == "nt":
+        return open(pipe_path, "wb")  # noqa: SIM115, PTH123
+    deadline = time.monotonic() + PIPE_CONNECT_TIMEOUT_SECONDS
+    while True:
+        try:
+            fd = os.open(pipe_path, os.O_WRONLY | os.O_NONBLOCK)
+            break
+        except OSError as error:
+            if error.errno != errno.ENXIO or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+    os.set_blocking(fd, True)
+    return os.fdopen(fd, "wb")
+
+
 __writer = None
 atexit.register(lambda: __writer.close() if __writer else None)
 
@@ -1196,7 +1224,7 @@ def send_message(
 
     if __writer is None:
         try:
-            __writer = open(TEST_RUN_PIPE, "wb")  # noqa: SIM115, PTH123
+            __writer = _open_pipe_writer(TEST_RUN_PIPE)
         except Exception as error:
             error_msg = f"Error attempting to connect to extension named pipe {TEST_RUN_PIPE}[vscode-pytest]: {error}"
             print(error_msg, file=sys.stderr)
